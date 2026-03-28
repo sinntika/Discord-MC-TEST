@@ -9,7 +9,7 @@
     "node": "18.x"
   },
   "dependencies": {
-    "mineflayer": "latest",
+    "bedrock-protocol": "latest",
     "node-fetch": "2"
   }
 }
