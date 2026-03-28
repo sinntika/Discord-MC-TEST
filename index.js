@@ -40,7 +40,7 @@ function logError(title, description) {
 function logInfo(title, description) {
   console.log(`[INFO] ${title}: ${description}`);
   sendWebhook(CONFIG.LOG_WEBHOOK, {
-    title: `📋 ${title}`,
+    title: ` ${title}`,
     description,
     color: 0x44aaff,
     timestamp: new Date().toISOString(),
