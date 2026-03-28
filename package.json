@@ -10,6 +10,7 @@
   },
   "dependencies": {
     "bedrock-protocol": "latest",
+    "discord.js": "^14.0.0",
     "node-fetch": "2"
   }
 }
