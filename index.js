@@ -2,18 +2,21 @@ const mineflayer = require('mineflayer');
 const fetch = require('node-fetch');
 
 const CONFIG = {
-  MC_HOST:      process.env.MC_HOST,
-  MC_PORT:      parseInt(process.env.MC_PORT) || 25565,
-  BOT_USERNAME: process.env.BOT_USERNAME,
-  MC_VERSION:   process.env.MC_VERSION || '1.21',
-  CHAT_WEBHOOK: process.env.CHAT_WEBHOOK,
-  LOG_WEBHOOK:  process.env.LOG_WEBHOOK,
+  MC_HOST:         process.env.MC_HOST,
+  MC_PORT:         parseInt(process.env.MC_PORT) || 25565,
+  BOT_USERNAME:    process.env.BOT_USERNAME,
+  MC_VERSION:      process.env.MC_VERSION || '1.21',
+  CHAT_WEBHOOK:    process.env.CHAT_WEBHOOK,
+  LOG_WEBHOOK:     process.env.LOG_WEBHOOK,
   RECONNECT_DELAY: 10000,
+  CONTROL_PREFIX:  '!',  // Discordコマンドのプレフィックス（MCチャット上）
 };
 
 let bot = null;
 let reconnectTimer = null;
+let stopped = false; // 停止フラグ
 
+// ===== Webhook =====
 async function sendWebhook(url, content, isEmbed = false) {
   try {
     const body = isEmbed ? { embeds: [content] } : { content };
@@ -47,6 +50,7 @@ function logInfo(title, description) {
   }, true);
 }
 
+// ===== プレイヤー一覧 =====
 function updatePlayerCount() {
   if (!bot || !bot.players) return;
   const players = Object.keys(bot.players).filter(p => p !== bot.username);
@@ -55,7 +59,12 @@ function updatePlayerCount() {
   logInfo(`🟢 オンライン人数: ${count}人`, `参加中: ${list}`);
 }
 
+// ===== 再接続 =====
 function scheduleReconnect() {
+  if (stopped) {
+    logInfo('再接続スキップ', '手動停止中のため再接続しません');
+    return;
+  }
   if (reconnectTimer) return;
   logInfo('再接続待機', `${CONFIG.RECONNECT_DELAY / 1000}秒後に再接続します...`);
   reconnectTimer = setTimeout(() => {
@@ -64,6 +73,28 @@ function scheduleReconnect() {
   }, CONFIG.RECONNECT_DELAY);
 }
 
+// ===== Bot停止 =====
+function stopBot() {
+  stopped = true;
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+  }
+  if (bot) {
+    bot.quit();
+    bot = null;
+  }
+  logInfo('🛑 Bot停止', '手動で停止しました。再開するには `!start` を送信してください');
+}
+
+// ===== Bot開始 =====
+function startBot() {
+  stopped = false;
+  logInfo('▶️ Bot再開', '手動で再開しました');
+  createBot();
+}
+
+// ===== Bot作成 =====
 function createBot() {
   if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
 
@@ -75,30 +106,65 @@ function createBot() {
     hideErrors: false,
   });
 
+  // 接続成功
   bot.once('spawn', () => {
-    logInfo('起動', `\`${CONFIG.MC_HOST}\` に接続しました`);
+    logInfo('Bot起動', `\`${CONFIG.MC_HOST}\` に接続しました`);
     updatePlayerCount();
+
+    // /earth コマンドを実行
+    setTimeout(() => {
+      bot.chat('/earth');
+      logInfo('/earth 実行', 'スポーン後に /earth を実行しました');
+    }, 3000); // 3秒待ってから実行（サーバー安定のため）
   });
 
+  // チャット受信（コマンド判定含む）
   bot.on('chat', (username, message) => {
     if (username === bot.username) return;
+
+    // --- コマンド処理 ---
+    if (message === '!stop') {
+      logInfo('コマンド受信', `${username} が !stop を実行しました`);
+      stopBot();
+      return;
+    }
+
+    if (message === '!start') {
+      if (!stopped) {
+        logInfo('コマンド受信', `${username} が !start を実行しましたが、すでに稼働中です`);
+        return;
+      }
+      logInfo('コマンド受信', `${username} が !start を実行しました`);
+      startBot();
+      return;
+    }
+
+    if (message === '!status') {
+      const status = stopped ? '🛑 停止中' : '🟢 稼働中';
+      logInfo('ステータス確認', `${username} が確認: ${status}`);
+      return;
+    }
+
+    // 通常チャットをDiscordへ
     sendWebhook(CONFIG.CHAT_WEBHOOK, `💬 **${username}**: ${message}`);
   });
 
+  // 参加・退出
   bot.on('playerJoined', (player) => {
     if (player.username === bot.username) return;
-    sendWebhook(CONFIG.CHAT_WEBHOOK, ` **${player.username}** が参加しました`);
+    sendWebhook(CONFIG.CHAT_WEBHOOK, `✅ **${player.username}** が参加しました`);
     updatePlayerCount();
   });
 
   bot.on('playerLeft', (player) => {
     if (player.username === bot.username) return;
-    sendWebhook(CONFIG.CHAT_WEBHOOK, ` **${player.username}** が退出しました`);
+    sendWebhook(CONFIG.CHAT_WEBHOOK, `🚪 **${player.username}** が退出しました`);
     updatePlayerCount();
   });
 
+  // エラー・切断
   bot.on('kicked', (reason) => {
-    logError('キックされました', reason);
+    logError('Botがキックされました', reason);
     scheduleReconnect();
   });
 
