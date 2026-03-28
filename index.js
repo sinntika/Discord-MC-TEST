@@ -1,22 +1,19 @@
-const mineflayer = require('mineflayer');
+const bedrock = require('bedrock-protocol');
 const fetch = require('node-fetch');
 
 const CONFIG = {
   MC_HOST:         process.env.MC_HOST,
-  MC_PORT:         parseInt(process.env.MC_PORT) || 25565,
+  MC_PORT:         parseInt(process.env.MC_PORT) || 19132,
   BOT_USERNAME:    process.env.BOT_USERNAME,
-  MC_VERSION:      process.env.MC_VERSION || '1.21',
   CHAT_WEBHOOK:    process.env.CHAT_WEBHOOK,
   LOG_WEBHOOK:     process.env.LOG_WEBHOOK,
   RECONNECT_DELAY: 10000,
-  CONTROL_PREFIX:  '!',  // Discordコマンドのプレフィックス（MCチャット上）
 };
 
-let bot = null;
+let client = null;
 let reconnectTimer = null;
-let stopped = false; // 停止フラグ
+let stopped = false;
 
-// ===== Webhook =====
 async function sendWebhook(url, content, isEmbed = false) {
   try {
     const body = isEmbed ? { embeds: [content] } : { content };
@@ -34,7 +31,7 @@ function logError(title, description) {
   console.error(`[ERROR] ${title}: ${description}`);
   sendWebhook(CONFIG.LOG_WEBHOOK, {
     title: `❌ ${title}`,
-    description: `\`\`\`${description}\`\`\``,
+    description: `\`\`\`${String(description).slice(0, 1000)}\`\`\``,
     color: 0xff4444,
     timestamp: new Date().toISOString(),
   }, true);
@@ -50,16 +47,6 @@ function logInfo(title, description) {
   }, true);
 }
 
-// ===== プレイヤー一覧 =====
-function updatePlayerCount() {
-  if (!bot || !bot.players) return;
-  const players = Object.keys(bot.players).filter(p => p !== bot.username);
-  const count = players.length;
-  const list = count > 0 ? players.join(', ') : 'なし';
-  logInfo(`🟢 オンライン人数: ${count}人`, `参加中: ${list}`);
-}
-
-// ===== 再接続 =====
 function scheduleReconnect() {
   if (stopped) {
     logInfo('再接続スキップ', '手動停止中のため再接続しません');
@@ -73,108 +60,111 @@ function scheduleReconnect() {
   }, CONFIG.RECONNECT_DELAY);
 }
 
-// ===== Bot停止 =====
 function stopBot() {
   stopped = true;
-  if (reconnectTimer) {
-    clearTimeout(reconnectTimer);
-    reconnectTimer = null;
-  }
-  if (bot) {
-    bot.quit();
-    bot = null;
-  }
-  logInfo('🛑 Bot停止', '手動で停止しました。再開するには `!start` を送信してください');
+  if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+  if (client) { try { client.disconnect(); } catch(e) {} client = null; }
+  logInfo('🛑 Bot停止', '手動で停止しました。再開するには `!start` をMCチャットで送信してください');
 }
 
-// ===== Bot開始 =====
 function startBot() {
   stopped = false;
   logInfo('▶️ Bot再開', '手動で再開しました');
   createBot();
 }
 
-// ===== Bot作成 =====
+function handleCommand(username, message) {
+  const cmd = message.trim();
+
+  if (cmd === '!stop') {
+    logInfo('コマンド受信', `${username} が !stop を実行しました`);
+    stopBot();
+    return true;
+  }
+  if (cmd === '!start') {
+    if (!stopped) {
+      logInfo('コマンド受信', `${username} が !start を実行しましたが、すでに稼働中です`);
+      return true;
+    }
+    logInfo('コマンド受信', `${username} が !start を実行しました`);
+    startBot();
+    return true;
+  }
+  if (cmd === '!status') {
+    logInfo('ステータス確認', `${username} が確認: ${stopped ? '🛑 停止中' : '🟢 稼働中'}`);
+    return true;
+  }
+  return false;
+}
+
 function createBot() {
   if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
 
-  bot = mineflayer.createBot({
+  client = bedrock.createClient({
     host: CONFIG.MC_HOST,
     port: CONFIG.MC_PORT,
     username: CONFIG.BOT_USERNAME,
-    version: CONFIG.MC_VERSION,
-    hideErrors: false,
+    offline: true,
   });
 
-  // 接続成功
-  bot.once('spawn', () => {
-    logInfo('Bot起動', `\`${CONFIG.MC_HOST}\` に接続しました`);
-    updatePlayerCount();
-
-    // /earth コマンドを実行
+  client.on('spawn', () => {
+    logInfo('Bot起動', `\`${CONFIG.MC_HOST}:${CONFIG.MC_PORT}\` に接続しました`);
     setTimeout(() => {
-      bot.chat('/earth');
+      client.queue('command_request', {
+        command: '/earth',
+        origin: { type: 'player', uuid: '', request_id: '' },
+        internal: false,
+        version: 52,
+      });
       logInfo('/earth 実行', 'スポーン後に /earth を実行しました');
-    }, 3000); // 3秒待ってから実行（サーバー安定のため）
+    }, 3000);
   });
 
-  // チャット受信（コマンド判定含む）
-  bot.on('chat', (username, message) => {
-    if (username === bot.username) return;
+  client.on('text', (packet) => {
+    // デバッグ：パケット内容をコンソールに出力
+    console.log('[TEXT PACKET]', JSON.stringify(packet));
 
-    // --- コマンド処理 ---
-    if (message === '!stop') {
-      logInfo('コマンド受信', `${username} が !stop を実行しました`);
-      stopBot();
-      return;
-    }
+    const type = packet.type;
+    const username = packet.source_name || '';
+    const message = packet.message || '';
 
-    if (message === '!start') {
-      if (!stopped) {
-        logInfo('コマンド受信', `${username} が !start を実行しましたが、すでに稼働中です`);
-        return;
-      }
-      logInfo('コマンド受信', `${username} が !start を実行しました`);
-      startBot();
-      return;
-    }
+    // BOT自身のメッセージは無視
+    if (username === CONFIG.BOT_USERNAME) return;
 
-    if (message === '!status') {
-      const status = stopped ? '🛑 停止中' : '🟢 稼働中';
-      logInfo('ステータス確認', `${username} が確認: ${status}`);
-      return;
-    }
+    // チャット以外（システムメッセージなど）は無視
+    if (type !== 'chat') return;
 
-    // 通常チャットをDiscordへ
+    // コマンド判定
+    if (handleCommand(username, message)) return;
+
+    // 通常チャット → Discord
     sendWebhook(CONFIG.CHAT_WEBHOOK, `💬 **${username}**: ${message}`);
   });
 
-  // 参加・退出
-  bot.on('playerJoined', (player) => {
-    if (player.username === bot.username) return;
-    sendWebhook(CONFIG.CHAT_WEBHOOK, `✅ **${player.username}** が参加しました`);
-    updatePlayerCount();
+  client.on('player_list', (packet) => {
+    if (!packet.records || !packet.records.records) return;
+    for (const record of packet.records.records) {
+      if (!record.username || record.username === CONFIG.BOT_USERNAME) continue;
+      if (packet.records.type === 'add') {
+        sendWebhook(CONFIG.CHAT_WEBHOOK, `✅ **${record.username}** が参加しました`);
+      } else if (packet.records.type === 'remove') {
+        sendWebhook(CONFIG.CHAT_WEBHOOK, `🚪 **${record.username}** が退出しました`);
+      }
+    }
   });
 
-  bot.on('playerLeft', (player) => {
-    if (player.username === bot.username) return;
-    sendWebhook(CONFIG.CHAT_WEBHOOK, `🚪 **${player.username}** が退出しました`);
-    updatePlayerCount();
-  });
-
-  // エラー・切断
-  bot.on('kicked', (reason) => {
-    logError('Botがキックされました', reason);
+  client.on('kick', (reason) => {
+    logError('Botがキックされました', JSON.stringify(reason));
     scheduleReconnect();
   });
 
-  bot.on('error', (err) => {
+  client.on('error', (err) => {
     logError('接続エラー', err.message);
     scheduleReconnect();
   });
 
-  bot.on('end', (reason) => {
-    logError('切断されました', reason || '原因不明');
+  client.on('close', () => {
+    logError('切断されました', '接続が閉じられました');
     scheduleReconnect();
   });
 }
